@@ -1,0 +1,8 @@
+﻿[Desktop Entry]
+Type=Application
+Name=PrivyDNS
+Comment=Privacy-focused DNS
+Exec=privydns
+Icon=privydns
+Terminal=true
+Categories=Network;Utility;
