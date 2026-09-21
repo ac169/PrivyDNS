@@ -18,6 +18,11 @@
   -x, --proxy <url>    Upstream proxy tunnel redirection routing.
                        Supports: http://127.0.0.1:1081 or socks5h://127.0.0.1:1080
 
+  -e, --ecs <subnet>   Attach EDNS Client Subnet to bypass geo-blocking/CDN slowdown.
+                       Supports IPv4 or IPv6 with masks, e.g.
+                       -v4: 223.5.5.0/24, 114.114.114.114/32
+                       -v6: 240e:c2:2000::/48
+
 -------------------------------------------------------------------------------
 ⚠️ [CRITICAL PROXY SURVIVAL NOTES / 代理使用核心注意事项]
 -------------------------------------------------------------------------------

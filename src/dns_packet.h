@@ -52,7 +52,7 @@ std::string qtype_to_str(uint16_t qtype);
 
 uint16_t str_to_qtype(const std::string &str);
 
-int build_dns_packet(const std::string &domain, uint16_t qtype, unsigned char *packet, int max_len);
+int build_dns_packet(const std::string &domain, uint16_t qtype, unsigned char *packet, int max_len, const std::string &ecs_ip = "", uint8_t ecs_mask = 0);
 
 int skip_name(const unsigned char *buffer, int pos, int len);
 
@@ -70,7 +70,7 @@ void print_dns_response(const DnsResponse &resp);
 
 void print_dns_responses(const std::vector<DnsResponse> &responses);
 
-int parse_dns_query(const unsigned char *buffer, int len, std::string &domain, uint16_t &qtype);
+int parse_dns_query(const unsigned char *buffer, int len, std::string &domain, uint16_t &qtype, bool *client_has_ecs, std::string *client_embedded_ip, uint8_t *client_embedded_mask);
 
 int build_dns_response(const DnsResponse &resp, unsigned char *buffer, int max_len);
 

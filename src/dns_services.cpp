@@ -17,10 +17,10 @@
 
 #include <openssl/ssl.h>
 
-DnsResponse query_udp(const std::string &domain, uint16_t qtype, const ServerEndpoint &ep, const std::string &proxy) {
+DnsResponse query_udp(const std::string &domain, uint16_t qtype, const ServerEndpoint &ep, const std::string &proxy, const std::string &ecs_ip, uint8_t ecs_mask) {
     DnsResponse resp;
     unsigned char packet[512];
-    int packet_len = build_dns_packet(domain, qtype, packet, sizeof(packet));
+    int packet_len = build_dns_packet(domain, qtype, packet, sizeof(packet), ecs_ip, ecs_mask);
     if (packet_len < 0) return resp;
 
     std::string p_type, p_host;
@@ -136,10 +136,10 @@ DnsResponse query_udp(const std::string &domain, uint16_t qtype, const ServerEnd
     return resp;
 }
 
-DnsResponse query_dot(const std::string &domain, uint16_t qtype, const ServerEndpoint &ep, const std::string &proxy) {
+DnsResponse query_dot(const std::string &domain, uint16_t qtype, const ServerEndpoint &ep, const std::string &proxy, const std::string &ecs_ip, uint8_t ecs_mask) {
     DnsResponse resp;
     unsigned char packet[512];
-    int packet_len = build_dns_packet(domain, qtype, packet, sizeof(packet));
+    int packet_len = build_dns_packet(domain, qtype, packet, sizeof(packet), ecs_ip, ecs_mask);
     if (packet_len < 0) return resp;
 
     std::string p_type, p_host;
@@ -294,10 +294,10 @@ DnsResponse query_dot(const std::string &domain, uint16_t qtype, const ServerEnd
     return resp;
 }
 
-DnsResponse query_doh(const std::string &domain, uint16_t qtype, const ServerEndpoint &ep, const std::string &proxy) {
+DnsResponse query_doh(const std::string &domain, uint16_t qtype, const ServerEndpoint &ep, const std::string &proxy, const std::string &ecs_ip, uint8_t ecs_mask) {
     DnsResponse resp;
     unsigned char packet[512];
-    int packet_len = build_dns_packet(domain, qtype, packet, sizeof(packet));
+    int packet_len = build_dns_packet(domain, qtype, packet, sizeof(packet), ecs_ip, ecs_mask);
     if (packet_len < 0) return resp;
 
     std::string host_for_url = ep.host;

@@ -8,7 +8,7 @@
 
 class DnsServer {
 public:
-    DnsServer(const std::string &listen_addr, int port, size_t cache_size, int min_ttl, int max_ttl, const ServerEndpoint &upstream, const std::string &proxy = "", int mgmt_port = 953);
+    DnsServer(const std::string &listen_addr, int port, size_t cache_size, int min_ttl, int max_ttl, const ServerEndpoint &upstream, const std::string &proxy = "", int mgmt_port = 953, const std::string &default_ecs_ip = "", uint8_t default_ecs_mask = 0);
 
     void start();
 
@@ -19,6 +19,8 @@ private:
     ServerEndpoint upstream_;
     std::string proxy_;
     int mgmt_port_;
+    std::string default_ecs_ip_;
+    uint8_t default_ecs_mask_;
 
     void handle_udp(int udp_sock);
 
@@ -26,7 +28,7 @@ private:
 
     void handle_management(int mgmt_sock, std::atomic<bool>& running);
 
-    DnsResponse resolve_upstream(const std::string &domain, uint16_t qtype);
+    DnsResponse resolve_upstream(const std::string &domain, uint16_t qtype, bool client_has_ecs, const std::string &client_embedded_ip, uint8_t client_embedded_mask, const std::string &client_network_ip);
 
     void process_query(const unsigned char *query, int query_len, unsigned char *response, int *response_len, const std::string &client_ip);
 

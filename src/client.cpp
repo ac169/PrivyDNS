@@ -37,6 +37,10 @@ void print_help(const char *program_path) {
     std::cout << "                       (If omitted, automatically executes dual-stack A + AAAA)\n\n";
     std::cout << "  -x, --proxy <url>    Upstream proxy tunnel redirection routing.\n";
     std::cout << "                       Supports: http://127.0.0.1:1081 or socks5h://127.0.0.1:1080\n\n";
+    std::cout << "  -e, --ecs <subnet>   Attach EDNS Client Subnet to bypass geo-blocking/CDN slowdown.\n";
+    std::cout << "                       Supports IPv4 or IPv6 with masks, e.g.,\n";
+    std::cout << "                       -v4: 223.5.5.0/24, 114.114.114.114/32\n";
+    std::cout << "                       -v6: 240e:c2:2000::/48\n\n";
     std::cout << "  -h, --help           Show this help message and exit.\n\n";
     std::cout << "-------------------------------------------------------------------------------\n";
     std::cout << "                         CRITICAL PROXY SURVIVAL NOTES:\n";
@@ -60,6 +64,9 @@ int main(int argc, char *argv[]) {
     std::string proxy_url = "";
     std::string type_arg = "";
 
+    std::string ecs_ip = "";
+    uint8_t ecs_mask = 0;
+
 #ifdef _WIN32
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -79,6 +86,18 @@ int main(int argc, char *argv[]) {
             proxy_url = argv[++i];
         } else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--type") == 0) && i + 1 < argc) {
             type_arg = argv[++i];
+        } else if ((strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--ecs") == 0) && i + 1 < argc) {
+            std::string ecs_arg = argv[++i];
+            size_t slash_pos = ecs_arg.find('/');
+            if (slash_pos != std::string::npos) {
+                // 如果带有斜杠 (如 223.5.5.0/24) 分别截取 IP 与 掩码
+                ecs_ip = ecs_arg.substr(0, slash_pos);
+                ecs_mask = (uint8_t) std::stoi(ecs_arg.substr(slash_pos + 1));
+            } else {
+                // 如果只传了 IP 没有斜杠, 自动根据是 v4 还是 v6 给定默认掩码
+                ecs_ip = ecs_arg;
+                ecs_mask = (ecs_ip.find(':') != std::string::npos) ? 64 : 24;
+            }
         } else if (argv[i][0] != '-') {
             domain = argv[i];
         }
@@ -100,29 +119,29 @@ int main(int argc, char *argv[]) {
 
     if (ep.protocol == "tls") {
         if (!type_arg.empty()) {
-            DnsResponse resp = query_dot(domain, str_to_qtype(type_arg), ep, proxy_url);
+            DnsResponse resp = query_dot(domain, str_to_qtype(type_arg), ep, proxy_url, ecs_ip, ecs_mask);
             print_dns_response(resp);
         } else {
-            DnsResponse resp_a = query_dot(domain, 0x0001, ep, proxy_url);
-            DnsResponse resp_aaaa = query_dot(domain, 0x001C, ep, proxy_url);
+            DnsResponse resp_a = query_dot(domain, 0x0001, ep, proxy_url, ecs_ip, ecs_mask);
+            DnsResponse resp_aaaa = query_dot(domain, 0x001C, ep, proxy_url, ecs_ip, ecs_mask);
             print_dns_responses({resp_a, resp_aaaa});
         }
     } else if (ep.protocol == "https") {
         if (!type_arg.empty()) {
-            DnsResponse resp = query_doh(domain, str_to_qtype(type_arg), ep, proxy_url);
+            DnsResponse resp = query_doh(domain, str_to_qtype(type_arg), ep, proxy_url, ecs_ip, ecs_mask);
             print_dns_response(resp);
         } else {
-            DnsResponse resp_a = query_doh(domain, 0x0001, ep, proxy_url);
-            DnsResponse resp_aaaa = query_doh(domain, 0x001C, ep, proxy_url);
+            DnsResponse resp_a = query_doh(domain, 0x0001, ep, proxy_url, ecs_ip, ecs_mask);
+            DnsResponse resp_aaaa = query_doh(domain, 0x001C, ep, proxy_url, ecs_ip, ecs_mask);
             print_dns_responses({resp_a, resp_aaaa});
         }
     } else {
         if (!type_arg.empty()) {
-            DnsResponse resp = query_udp(domain, str_to_qtype(type_arg), ep, proxy_url);
+            DnsResponse resp = query_udp(domain, str_to_qtype(type_arg), ep, proxy_url, ecs_ip, ecs_mask);
             print_dns_response(resp);
         } else {
-            DnsResponse resp_a = query_udp(domain, 0x0001, ep, proxy_url);
-            DnsResponse resp_aaaa = query_udp(domain, 0x001C, ep, proxy_url);
+            DnsResponse resp_a = query_udp(domain, 0x0001, ep, proxy_url, ecs_ip, ecs_mask);
+            DnsResponse resp_aaaa = query_udp(domain, 0x001C, ep, proxy_url, ecs_ip, ecs_mask);
             print_dns_responses({resp_a, resp_aaaa});
         }
     }

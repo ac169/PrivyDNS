@@ -27,10 +27,9 @@ typedef SOCKET socket_t;
 typedef int socket_t;
 #endif
 
-DnsServer::DnsServer(const std::string &listen_addr, int port, size_t cache_size, int min_ttl, int max_ttl, const ServerEndpoint &upstream, const std::string &proxy, int mgmt_port) : listen_addr_(listen_addr),
-                                                                                                                                                                        port_(port), cache_(cache_size, min_ttl, max_ttl),
-                                                                                                                                                                        upstream_(upstream),
-                                                                                                                                                                        proxy_(proxy), mgmt_port_(mgmt_port) {}
+DnsServer::DnsServer(const std::string &listen_addr, int port, size_t cache_size, int min_ttl, int max_ttl, const ServerEndpoint &upstream, const std::string &proxy, int mgmt_port,
+                     const std::string &default_ecs_ip, uint8_t default_ecs_mask) : listen_addr_(listen_addr), port_(port), cache_(cache_size, min_ttl, max_ttl), upstream_(upstream), proxy_(proxy),
+                                                                                    mgmt_port_(mgmt_port), default_ecs_ip_(default_ecs_ip), default_ecs_mask_(default_ecs_mask) {}
 
 void DnsServer::start() {
 #ifdef _WIN32
@@ -162,7 +161,7 @@ void DnsServer::handle_udp(int udp_sock) {
         if (client_addr.sin_family == AF_INET) {
             inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
         } else if (client_addr.sin_family == AF_INET6) {
-            struct sockaddr_in6* addr6 = (struct sockaddr_in6*)&client_addr;
+            struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) &client_addr;
             inet_ntop(AF_INET6, &addr6->sin6_addr, client_ip, sizeof(client_ip));
         }
         process_query(buffer, n, response, &response_len, std::string(client_ip));
@@ -207,7 +206,7 @@ void DnsServer::handle_tcp(int tcp_sock) {
             if (client_addr.sin_family == AF_INET) {
                 inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
             } else if (client_addr.sin_family == AF_INET6) {
-                struct sockaddr_in6* addr6 = (struct sockaddr_in6*)&client_addr;
+                struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *) &client_addr;
                 inet_ntop(AF_INET6, &addr6->sin6_addr, client_ip, sizeof(client_ip));
             }
             process_query(query, query_len, response, &response_len, std::string(client_ip));
@@ -270,7 +269,12 @@ void DnsServer::handle_management(int mgmt_sock, std::atomic<bool> &running) {
 void DnsServer::process_query(const unsigned char *query, int query_len, unsigned char *response, int *response_len, const std::string &client_ip) {
     std::string domain;
     uint16_t qtype;
-    if (parse_dns_query(query, query_len, domain, qtype) != 0) {
+
+    bool client_has_ecs = false;
+    std::string client_embedded_ip = "";
+    uint8_t client_embedded_mask = 0;
+
+    if (parse_dns_query(query, query_len, domain, qtype, &client_has_ecs, &client_embedded_ip, &client_embedded_mask) != 0) {
         *response_len = 0;
         return;
     }
@@ -285,7 +289,7 @@ void DnsServer::process_query(const unsigned char *query, int query_len, unsigne
         resp.header.id = (query[0] << 8) | query[1];
     } else {
         // 2. 缓存未命中, 向上游查询
-        resp = resolve_upstream(domain, qtype);
+        resp = resolve_upstream(domain, qtype, client_has_ecs, client_embedded_ip, client_embedded_mask, client_ip);
         if (resp.valid) {
             // 缓存结果 (保留原始 ID, 但缓存时 ID 不重要, 后续会覆盖)
             cache_.put(domain, qtype, resp);
@@ -402,16 +406,54 @@ void DnsServer::process_query(const unsigned char *query, int query_len, unsigne
     std::cout << "[" << time_str << "] client=" << client_ip << " query=" << domain << " type=" << qtype_to_str(qtype) << " rcode=" << rcode_str << " answers=" << answers_str << std::endl;
 }
 
-DnsResponse DnsServer::resolve_upstream(const std::string &domain, uint16_t qtype) {
+DnsResponse DnsServer::resolve_upstream(const std::string &domain, uint16_t qtype, bool client_has_ecs, const std::string &client_embedded_ip, uint8_t client_embedded_mask, const std::string &client_network_ip) {
 //    std::cerr << "[DEBUG] Resolving upstream: " << domain << " type=" << qtype << " via " << upstream_.protocol << " host=" << upstream_.host << " port=" << upstream_.port << " path="
 //              << upstream_.path << "\n";
     DnsResponse resp;
-    if (upstream_.protocol == "tls") {
-        resp = query_dot(domain, qtype, upstream_, proxy_);
-    } else if (upstream_.protocol == "https") {
-        resp = query_doh(domain, qtype, upstream_, proxy_);
+    std::string final_ecs_ip;
+    uint8_t final_ecs_mask;
+
+    if (client_has_ecs && !client_embedded_ip.empty()) {
+        final_ecs_ip = client_embedded_ip;
+        final_ecs_mask = client_embedded_mask;
+    } else if (!default_ecs_ip_.empty()) {
+        final_ecs_ip = default_ecs_ip_;
+        final_ecs_mask = default_ecs_mask_;
     } else {
-        resp = query_udp(domain, qtype, upstream_, proxy_);
+        bool is_local = false;
+
+        if (client_network_ip.empty() || client_network_ip == "127.0.0.1" || client_network_ip == "::1") {
+            is_local = true;
+        } else if (client_network_ip.find(':') != std::string::npos) {
+            if (client_network_ip.length() > 4 && client_network_ip[4] == ':') {
+                char first_char = client_network_ip[0];
+                if (first_char != '2' && first_char != '3') {
+                    is_local = true;
+                }
+            } else {
+                is_local = true;
+            }
+        } else {
+            if (client_network_ip.compare(0, 8, "192.168.") == 0 || client_network_ip.compare(0, 3, "10.") == 0 || client_network_ip.compare(0, 4, "172.") == 0) {
+                is_local = true;
+            }
+        }
+
+        if (is_local) {
+            final_ecs_ip = "";
+            final_ecs_mask = 0;
+        } else {
+            final_ecs_ip = client_network_ip;
+            final_ecs_mask = (client_network_ip.find(':') != std::string::npos) ? 64 : 24;
+        }
+    }
+
+    if (upstream_.protocol == "tls") {
+        resp = query_dot(domain, qtype, upstream_, proxy_, final_ecs_ip, final_ecs_mask);
+    } else if (upstream_.protocol == "https") {
+        resp = query_doh(domain, qtype, upstream_, proxy_, final_ecs_ip, final_ecs_mask);
+    } else {
+        resp = query_udp(domain, qtype, upstream_, proxy_, final_ecs_ip, final_ecs_mask);
     }
 //    std::cerr << "[DEBUG] Upstream valid=" << resp.valid << ", answers=" << resp.answers.size() << "\n";
     return resp;

@@ -34,8 +34,31 @@ uint16_t str_to_qtype(const std::string &str) {
     return 0x0001; /* Fallback to A */
 }
 
-int build_dns_packet(const std::string &domain, uint16_t qtype, unsigned char *packet, int max_len) {
+int build_dns_packet(const std::string &domain, uint16_t qtype, unsigned char *packet, int max_len, const std::string &ecs_ip, uint8_t ecs_mask) {
     if (max_len < 12) return -1;
+
+    bool enable_ecs = false;
+    uint16_t family = 1;
+    std::vector<uint8_t> ip_bytes;
+
+    if (!ecs_ip.empty() && ecs_mask > 0) {
+        if (ecs_ip.find(':') != std::string::npos) {
+            family = 2; // IPv6
+            uint8_t buf[16];
+            if (inet_pton(AF_INET6, ecs_ip.c_str(), buf) == 1) {
+                ip_bytes.assign(buf, buf + 16);
+                enable_ecs = true;
+            }
+        } else {
+            family = 1; // IPv4
+            uint8_t buf[4];
+            if (inet_pton(AF_INET, ecs_ip.c_str(), buf) == 1) {
+                ip_bytes.assign(buf, buf + 4);
+                enable_ecs = true;
+            }
+        }
+    }
+
     packet[0] = 0x12;
     packet[1] = 0x34; /* ID */
     packet[2] = 0x01;
@@ -47,7 +70,15 @@ int build_dns_packet(const std::string &domain, uint16_t qtype, unsigned char *p
     packet[8] = 0x00;
     packet[9] = 0x00; /* NSCOUNT: 0 */
     packet[10] = 0x00;
-    packet[11] = 0x00; /* ARCOUNT: 0 */
+
+    // packet[11] = 0x00; /* ARCOUNT: 0 */
+
+    // 如果启用了 ECS，ARCOUNT 填 1，否则填 0
+    if (enable_ecs) {
+        packet[11] = 0x01; /* ARCOUNT: 1 */
+    } else {
+        packet[11] = 0x00; /* ARCOUNT: 0 */
+    }
 
     int pos = 12;
     size_t start = 0;
@@ -73,7 +104,52 @@ int build_dns_packet(const std::string &domain, uint16_t qtype, unsigned char *p
     packet[pos++] = qtype & 0xFF;
     packet[pos++] = 0x00;
     packet[pos++] = 0x01; /* QCLASS: IN */
-    return pos;
+
+    // 如果不需要扩展, 到这里就直接结束并返回
+    if (!enable_ecs) {
+        return pos;
+    }
+
+    // 填充 OPT Record (EDNS0)
+    int ip_bytes_len = (ecs_mask + 7) / 8; // 动态计算该掩码需要占用的字节数
+    if (pos + 11 + 4 + ip_bytes_len > max_len) return -1;
+
+    packet[pos++] = 0x00; /* NAME: 空域名 */
+    packet[pos++] = 0x00;
+    packet[pos++] = 0x29; /* TYPE: 41 (OPT) */
+    packet[pos++] = 0x10;
+    packet[pos++] = 0x00; /* CLASS: 4096 (UDP payload size) */
+    packet[pos++] = 0x00; /* EXTENDED-RCODE */
+    packet[pos++] = 0x00; /* VERSION: 0 */
+    packet[pos++] = 0x00;
+    packet[pos++] = 0x00; /* DO bit = 0, Z = 0 */
+
+    // RDLEN = ECS 选项头(4字节) + IP 实际字节数
+    // Option Code(2字节) + Option Len(2字节) + Family(2字节) + Source(1字节) + Scope(1字节) + IP字节数
+    uint16_t rdlen = 2 + 2 + 2 + 1 + 1 + ip_bytes_len;
+    packet[pos++] = (rdlen >> 8) & 0xFF;
+    packet[pos++] = rdlen & 0xFF;
+
+    // 填充 RDATA 内部的 ECS Option
+    packet[pos++] = 0x00;
+    packet[pos++] = 0x08; /* OPTION-CODE: 8 (ECS) */
+
+    // OPTION-LENGTH
+    // Family(2字节) + Source(1字节) + Scope(1字节) + IP字节数
+    uint16_t option_len = 2 + 1 + 1 + ip_bytes_len;
+    packet[pos++] = (option_len >> 8) & 0xFF;
+    packet[pos++] = option_len & 0xFF;
+
+    packet[pos++] = (family >> 8) & 0xFF;
+    packet[pos++] = family & 0xFF;       /* FAMILY: 1 为 IPv4 */
+    packet[pos++] = ecs_mask;            /* SOURCE-PREFIX-LENGTH: 掩码 (如 24) */
+    packet[pos++] = 0x00;                /* SCOPE-PREFIX-LENGTH: 必须填 0 */
+
+    // 拷贝客户端 IP 字节
+    memcpy(&packet[pos], ip_bytes.data(), ip_bytes_len);
+    pos += ip_bytes_len;
+
+    return pos; /* 返回最终的总报文长度 */
 }
 
 int skip_name(const unsigned char *buffer, int pos, int len) {
@@ -115,6 +191,98 @@ static int read_name(const unsigned char *buffer, int len, int pos, std::string 
             first = false;
         }
     }
+}
+
+static int read_edns(const unsigned char *buffer, int len, int pos, bool *has_ecs, std::string *ecs_ip, uint8_t *ecs_mask) {
+    if (!has_ecs || !ecs_ip || !ecs_mask) {
+        return pos;
+    }
+
+    *has_ecs = false;
+    ecs_ip->clear();
+    *ecs_mask = 0;
+
+    if (pos < 0 || pos >= len) return -1;
+
+    uint16_t ancount = (buffer[6] << 8) | buffer[7];
+    uint16_t nscount = (buffer[8] << 8) | buffer[9];
+    uint16_t arcount = (buffer[10] << 8) | buffer[11];
+
+    if (arcount == 0) return pos;
+
+    auto skip_next_rr = [&](int &current_pos) -> bool {
+        std::string dummy_name;
+        current_pos = read_name(buffer, len, current_pos, dummy_name);
+        if (current_pos < 0 || current_pos + 10 > len) return false;
+        uint16_t rdlen = (buffer[current_pos + 8] << 8) | buffer[current_pos + 9];
+        current_pos += 10 + rdlen;
+        return current_pos <= len;
+    };
+
+    for (int i = 0; i < ancount; ++i) { if (!skip_next_rr(pos)) return -1; }
+    for (int i = 0; i < nscount; ++i) { if (!skip_next_rr(pos)) return -1; }
+
+    for (int i = 0; i < arcount; ++i) {
+        if (pos < 0 || pos >= len) break;
+
+        std::string attr_name;
+        pos = read_name(buffer, len, pos, attr_name);
+        if (pos < 0 || pos + 10 > len) return -1;
+
+        uint16_t type = (buffer[pos] << 8) | buffer[pos + 1];
+        uint16_t rdlen = (buffer[pos + 8] << 8) | buffer[pos + 9];
+        int next_record_pos = pos + 10 + rdlen;
+
+        pos += 10;
+        if (pos + rdlen > len) return -1;
+
+        if (type != 41) {
+            pos = next_record_pos;
+            continue;
+        }
+
+        int rdata_end = pos + rdlen;
+        while (pos + 4 <= rdata_end) {
+            uint16_t option_code = (buffer[pos] << 8) | buffer[pos + 1];
+            uint16_t option_len = (buffer[pos + 2] << 8) | buffer[pos + 3];
+            pos += 4;
+
+            if (pos + option_len > rdata_end) return -1;
+
+            if (option_code == 8) {
+                if (option_len < 4) return -1;
+
+                uint16_t family = (buffer[pos] << 8) | buffer[pos + 1];
+                *ecs_mask = buffer[pos + 2];
+
+                int ip_bytes_len = (*ecs_mask + 7) / 8;
+                if (4 + ip_bytes_len > option_len) return -1;
+
+                char ip_str[INET6_ADDRSTRLEN] = {0};
+
+                if (family == 1 && ip_bytes_len <= 4) {
+                    uint8_t ipv4_buf[4] = {0};
+                    std::memcpy(ipv4_buf, &buffer[pos + 4], ip_bytes_len);
+                    inet_ntop(AF_INET, ipv4_buf, ip_str, sizeof(ip_str));
+                    *ecs_ip = ip_str;
+                    *has_ecs = true;
+                } else if (family == 2 && ip_bytes_len <= 16) {
+                    uint8_t ipv6_buf[16] = {0};
+                    std::memcpy(ipv6_buf, &buffer[pos + 4], ip_bytes_len);
+                    inet_ntop(AF_INET6, ipv6_buf, ip_str, sizeof(ip_str));
+                    *ecs_ip = ip_str;
+                    *has_ecs = true;
+                }
+                return next_record_pos;
+            }
+
+            pos += option_len;
+        }
+
+        pos = next_record_pos;
+    }
+
+    return pos;
 }
 
 static std::string format_rdata(uint16_t type, const unsigned char *rdata, int rdlen, const unsigned char *full_buffer, int full_len) {
@@ -758,14 +926,21 @@ void print_dns_responses(const std::vector<DnsResponse> &responses) {
     }
 }
 
-int parse_dns_query(const unsigned char *buffer, int len, std::string &domain, uint16_t &qtype) {
+int parse_dns_query(const unsigned char *buffer, int len, std::string &domain, uint16_t &qtype, bool *client_has_ecs, std::string *client_embedded_ip, uint8_t *client_embedded_mask) {
     if (len < 12) return -1;
+
     int pos = 12;
-    // Skip question name
-    pos = read_name(buffer, len, pos, domain);   // uses existing static read_name
+    pos = read_name(buffer, len, pos, domain);
+
     if (pos < 0 || pos + 4 > len) return -1;
+
     qtype = (buffer[pos] << 8) | buffer[pos + 1];
-    // We don't need qclass, skip
+
+    if (pos < 0 || pos + 4 > len) return -1;
+
+    pos += 4;
+    read_edns(buffer, len, pos, client_has_ecs, client_embedded_ip, client_embedded_mask);
+
     return 0;
 }
 
